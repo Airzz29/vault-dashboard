@@ -137,6 +137,115 @@ function runMigrations(database: Database.Database) {
   }
 
   migrateSalePricesV3(database);
+  migrateTbdPricesV4(database);
+}
+
+interface TbdPriceUpdate {
+  buy_price_cny: number;
+  sale_price_aud: number;
+}
+
+const TBD_PRICE_UPDATES: Record<string, TbdPriceUpdate> = {
+  B22: { buy_price_cny: 218.4, sale_price_aud: 120 },
+  B30: { buy_price_cny: 218.4, sale_price_aud: 120 },
+  'Berry Zipup Hoodie': { buy_price_cny: 115, sale_price_aud: 90 },
+  'Polo Sweater': { buy_price_cny: 99, sale_price_aud: 80 },
+  "95's Corties": { buy_price_cny: 111, sale_price_aud: 120 },
+  'Essentials Open Pants': { buy_price_cny: 109, sale_price_aud: 90 },
+  'Essentials Cuffed Pants': { buy_price_cny: 178, sale_price_aud: 90 },
+  'Essentials Hoodie': { buy_price_cny: 145, sale_price_aud: 90 },
+  'NorthFace Puffer Jacket': { buy_price_cny: 168, sale_price_aud: 150 },
+};
+
+const CLOTHING_CATEGORIES = new Set([
+  'Hoodies',
+  'Shirts',
+  'Pants',
+  'Shorts',
+  'Jeans',
+]);
+
+function logProfitWarnings(database: Database.Database) {
+  const products = database
+    .prepare(
+      'SELECT name, category, net_profit_aud FROM products WHERE net_profit_aud IS NOT NULL'
+    )
+    .all() as { name: string; category: string; net_profit_aud: number }[];
+
+  for (const p of products) {
+    if (p.category === 'Shoes' && p.net_profit_aud < 50) {
+      console.warn(
+        `[vault] Low profit (Shoes < $50): ${p.name} → $${p.net_profit_aud.toFixed(2)}`
+      );
+    } else if (
+      CLOTHING_CATEGORIES.has(p.category) &&
+      p.net_profit_aud < 40
+    ) {
+      console.warn(
+        `[vault] Low profit (Clothing < $40): ${p.name} → $${p.net_profit_aud.toFixed(2)}`
+      );
+    }
+  }
+}
+
+function migrateTbdPricesV4(database: Database.Database) {
+  const done = database
+    .prepare("SELECT 1 FROM schema_migrations WHERE key = 'tbd_prices_v4'")
+    .get();
+  if (done) return;
+
+  const exchangeRates = getExchangeRatesInput(database);
+  const shippingRates = getShippingRatesInput(database);
+  const recalc = database.prepare(`
+    UPDATE products SET
+      buy_price_cny = ?, sale_price_aud = ?, is_aud_direct = 0,
+      buy_price_aud = ?, shipping_buffer_aud = ?, global_surcharge_aud = ?,
+      platform_fee_aud = ?, total_cost_aud = ?, revenue_aud = ?,
+      net_profit_aud = ?, margin_percent = ?
+    WHERE id = ?
+  `);
+
+  for (const [name, update] of Object.entries(TBD_PRICE_UPDATES)) {
+    const p = database
+      .prepare('SELECT * FROM products WHERE name = ?')
+      .get(name) as Product | undefined;
+    if (!p) continue;
+
+    const calc = calculateProduct(
+      {
+        buy_price_cny: update.buy_price_cny,
+        buy_price_aud: null,
+        is_aud_direct: 0,
+        estimated_weight_kg: p.estimated_weight_kg,
+        sale_price_aud: update.sale_price_aud,
+        qty: p.qty,
+      },
+      exchangeRates,
+      shippingRates
+    );
+
+    recalc.run(
+      update.buy_price_cny,
+      update.sale_price_aud,
+      calc.buy_price_aud,
+      calc.shipping_buffer_aud,
+      calc.global_surcharge_aud,
+      calc.platform_fee_aud,
+      calc.total_cost_aud,
+      calc.revenue_aud,
+      calc.net_profit_aud,
+      calc.margin_percent,
+      p.id
+    );
+  }
+
+  logProfitWarnings(database);
+
+  database
+    .prepare(
+      "INSERT INTO schema_migrations (key, applied_at) VALUES ('tbd_prices_v4', ?)"
+    )
+    .run(new Date().toISOString());
 }
 
 const SALE_PRICE_UPDATES: Record<string, number> = {
@@ -223,7 +332,7 @@ interface SeedProduct {
 }
 
 const SEED_PRODUCTS: SeedProduct[] = [
-  { name: 'NorthFace Puffer Jacket', category: 'Hoodies', fulfillment_type: 'Physical', qty: 9, buy_price_cny: null, estimated_weight_kg: 0.9, sale_price_aud: 150 },
+  { name: 'NorthFace Puffer Jacket', category: 'Hoodies', fulfillment_type: 'Physical', qty: 9, buy_price_cny: 168, estimated_weight_kg: 0.9, sale_price_aud: 150 },
   { name: 'Polo Puffer Vest', category: 'Hoodies', fulfillment_type: 'Physical', qty: 6, buy_price_cny: 109, estimated_weight_kg: 0.9, sale_price_aud: 120 },
   { name: 'Polo Shirt', category: 'Shirts', fulfillment_type: 'Physical', qty: 9, buy_price_cny: 49, estimated_weight_kg: 0.4, sale_price_aud: 60 },
   { name: 'City Polos', category: 'Shirts', fulfillment_type: 'Physical', qty: 21, buy_price_cny: 95, estimated_weight_kg: 0.4, sale_price_aud: 80 },
@@ -232,7 +341,7 @@ const SEED_PRODUCTS: SeedProduct[] = [
   { name: 'CH Glasses', category: 'Accessories', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 17, estimated_weight_kg: 0.2, sale_price_aud: 35 },
   { name: 'P600', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 159, estimated_weight_kg: 1.0, sale_price_aud: 110 },
   { name: 'Corties Shorts', category: 'Shorts', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 55, estimated_weight_kg: 0.4, sale_price_aud: 60 },
-  { name: 'Berry Zipup Hoodie', category: 'Hoodies', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: null, estimated_weight_kg: 0.7, sale_price_aud: 90 },
+  { name: 'Berry Zipup Hoodie', category: 'Hoodies', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 115, estimated_weight_kg: 0.7, sale_price_aud: 90 },
   { name: 'Airmax 95', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 116, estimated_weight_kg: 1.0, sale_price_aud: 100 },
   { name: 'LV Skates', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 120, estimated_weight_kg: 1.0, sale_price_aud: 105 },
   { name: "TN's", category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 98, estimated_weight_kg: 1.0, sale_price_aud: 90 },
@@ -245,15 +354,15 @@ const SEED_PRODUCTS: SeedProduct[] = [
   { name: 'Berry Shorts', category: 'Shorts', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 99, estimated_weight_kg: 0.4, sale_price_aud: 80 },
   { name: 'NB 2002R', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 165, estimated_weight_kg: 1.0, sale_price_aud: 120 },
   { name: 'RL Zipup', category: 'Hoodies', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 126, estimated_weight_kg: 0.7, sale_price_aud: 90 },
-  { name: 'Polo Sweater', category: 'Hoodies', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: null, estimated_weight_kg: 0.7, sale_price_aud: 80 },
-  { name: "95's Corties", category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: null, estimated_weight_kg: 1.0, sale_price_aud: 120 },
+  { name: 'Polo Sweater', category: 'Hoodies', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 99, estimated_weight_kg: 0.7, sale_price_aud: 80 },
+  { name: "95's Corties", category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 111, estimated_weight_kg: 1.0, sale_price_aud: 120 },
   { name: 'Gel Kayano 14', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 167, estimated_weight_kg: 1.0, sale_price_aud: 110 },
   { name: 'CH Floral Zipup Hoodie', category: 'Hoodies', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 114, estimated_weight_kg: 0.7, sale_price_aud: 110 },
-  { name: 'Essentials Open Pants', category: 'Pants', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: null, estimated_weight_kg: 0.6, sale_price_aud: 90 },
-  { name: 'Essentials Cuffed Pants', category: 'Pants', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: null, estimated_weight_kg: 0.6, sale_price_aud: 90 },
-  { name: 'Essentials Hoodie', category: 'Hoodies', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: null, estimated_weight_kg: 0.7, sale_price_aud: 90 },
-  { name: 'B22', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: null, estimated_weight_kg: 1.0, sale_price_aud: 120 },
-  { name: 'B30', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: null, estimated_weight_kg: 1.0, sale_price_aud: 120 },
+  { name: 'Essentials Open Pants', category: 'Pants', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 109, estimated_weight_kg: 0.6, sale_price_aud: 90 },
+  { name: 'Essentials Cuffed Pants', category: 'Pants', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 178, estimated_weight_kg: 0.6, sale_price_aud: 90 },
+  { name: 'Essentials Hoodie', category: 'Hoodies', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 145, estimated_weight_kg: 0.7, sale_price_aud: 90 },
+  { name: 'B22', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 218.4, estimated_weight_kg: 1.0, sale_price_aud: 120 },
+  { name: 'B30', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 218.4, estimated_weight_kg: 1.0, sale_price_aud: 120 },
   { name: 'Essentials Shorts', category: 'Shorts', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 80, estimated_weight_kg: 0.4, sale_price_aud: 65 },
   { name: 'Gel NYC', category: 'Shoes', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 147, estimated_weight_kg: 1.0, sale_price_aud: 110 },
   { name: 'Essentials Shirts', category: 'Shirts', fulfillment_type: 'Dropship', qty: -1, buy_price_cny: 80, estimated_weight_kg: 0.4, sale_price_aud: 70 },
