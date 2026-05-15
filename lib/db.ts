@@ -1,7 +1,11 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
-import { calculateProduct, Rates } from './calculations';
+import {
+  calculateProduct,
+  ExchangeRatesInput,
+  ShippingRateInput,
+} from './calculations';
 
 const DB_PATH =
   process.env.NODE_ENV === 'production'
@@ -9,6 +13,15 @@ const DB_PATH =
     : path.join(process.cwd(), 'data', 'vault.db');
 
 let db: Database.Database | null = null;
+
+const SHIPPING_SEED: Omit<ShippingRateInput, 'id'>[] = [
+  { country: 'Australia', express_name: 'Australia Dedicated Line F', rate_1kg_usd: 12, rate_2kg_usd: 18, rate_3kg_usd: 26, is_base_country: 1 },
+  { country: 'USA', express_name: 'USPS Small Parcel-F Box', rate_1kg_usd: 20, rate_2kg_usd: 36, rate_3kg_usd: 52, is_base_country: 0 },
+  { country: 'UK', express_name: 'UK Dedicated Line Small Parcel F', rate_1kg_usd: 11, rate_2kg_usd: 20, rate_3kg_usd: 29, is_base_country: 0 },
+  { country: 'Netherlands', express_name: 'Europe DHL Small Parcel F-H', rate_1kg_usd: 16, rate_2kg_usd: 25, rate_3kg_usd: 34, is_base_country: 0 },
+  { country: 'France', express_name: 'Europe DHL Small Parcel F-H', rate_1kg_usd: 18, rate_2kg_usd: 27, rate_3kg_usd: 36, is_base_country: 0 },
+  { country: 'Canada', express_name: 'Canada Dedicated Line Small Parcel F', rate_1kg_usd: 17, rate_2kg_usd: 30, rate_3kg_usd: 43, is_base_country: 0 },
+];
 
 function getDb(): Database.Database {
   if (!db) {
@@ -19,9 +32,15 @@ function getDb(): Database.Database {
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
     initSchema(db);
+    runMigrations(db);
     seedIfEmpty(db);
   }
   return db;
+}
+
+function columnExists(database: Database.Database, table: string, column: string): boolean {
+  const cols = database.pragma(`table_info(${table})`) as { name: string }[];
+  return cols.some((c) => c.name === column);
 }
 
 function initSchema(database: Database.Database) {
@@ -44,7 +63,8 @@ function initSchema(database: Database.Database) {
       margin_percent REAL,
       status TEXT DEFAULT 'In Stock',
       date_added TEXT,
-      is_aud_direct INTEGER DEFAULT 0
+      is_aud_direct INTEGER DEFAULT 0,
+      global_surcharge_aud REAL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS exchange_rates (
@@ -55,7 +75,21 @@ function initSchema(database: Database.Database) {
       usd_per_kg_worst_case REAL DEFAULT 20,
       last_updated TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS shipping_rates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      country TEXT NOT NULL,
+      express_name TEXT NOT NULL,
+      rate_1kg_usd REAL NOT NULL,
+      rate_2kg_usd REAL NOT NULL,
+      rate_3kg_usd REAL NOT NULL,
+      is_base_country INTEGER DEFAULT 0
+    );
   `);
+
+  if (!columnExists(database, 'products', 'global_surcharge_aud')) {
+    database.exec(`ALTER TABLE products ADD COLUMN global_surcharge_aud REAL DEFAULT 0`);
+  }
 
   const ratesCount = database
     .prepare('SELECT COUNT(*) as c FROM exchange_rates')
@@ -65,6 +99,39 @@ function initSchema(database: Database.Database) {
       .prepare(
         `INSERT INTO exchange_rates (id, usd_to_aud, cny_to_aud, alibaba_fee_percent, usd_per_kg_worst_case, last_updated)
          VALUES (1, 1.38, 0.204, 0.03, 20, ?)`
+      )
+      .run(new Date().toISOString());
+  }
+
+  const shippingCount = database
+    .prepare('SELECT COUNT(*) as c FROM shipping_rates')
+    .get() as { c: number };
+  if (shippingCount.c === 0) {
+    const insert = database.prepare(`
+      INSERT INTO shipping_rates (country, express_name, rate_1kg_usd, rate_2kg_usd, rate_3kg_usd, is_base_country)
+      VALUES (@country, @express_name, @rate_1kg_usd, @rate_2kg_usd, @rate_3kg_usd, @is_base_country)
+    `);
+    for (const row of SHIPPING_SEED) {
+      insert.run(row);
+    }
+  }
+}
+
+function runMigrations(database: Database.Database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      key TEXT PRIMARY KEY,
+      applied_at TEXT
+    )
+  `);
+  const done = database
+    .prepare("SELECT 1 FROM schema_migrations WHERE key = 'shipping_v2'")
+    .get();
+  if (!done) {
+    recalculateAllProducts(database);
+    database
+      .prepare(
+        "INSERT INTO schema_migrations (key, applied_at) VALUES ('shipping_v2', ?)"
       )
       .run(new Date().toISOString());
   }
@@ -125,18 +192,19 @@ function seedIfEmpty(database: Database.Database) {
     .get() as { c: number };
   if (count.c > 0) return;
 
-  const rates = getRates(database);
+  const exchangeRates = getExchangeRatesInput(database);
+  const shippingRates = getShippingRatesInput(database);
   const insert = database.prepare(`
     INSERT INTO products (
       name, category, fulfillment_type, qty, buy_price_cny, buy_price_aud,
       shipping_buffer_aud, platform_fee_aud, total_cost_aud, estimated_weight_kg,
       sale_price_aud, revenue_aud, net_profit_aud, margin_percent, status,
-      date_added, is_aud_direct
+      date_added, is_aud_direct, global_surcharge_aud
     ) VALUES (
       @name, @category, @fulfillment_type, @qty, @buy_price_cny, @buy_price_aud,
       @shipping_buffer_aud, @platform_fee_aud, @total_cost_aud, @estimated_weight_kg,
       @sale_price_aud, @revenue_aud, @net_profit_aud, @margin_percent, 'In Stock',
-      @date_added, @is_aud_direct
+      @date_added, @is_aud_direct, @global_surcharge_aud
     )
   `);
 
@@ -152,7 +220,8 @@ function seedIfEmpty(database: Database.Database) {
         sale_price_aud: p.sale_price_aud,
         qty: p.qty,
       },
-      rates
+      exchangeRates,
+      shippingRates
     );
     insert.run({
       name: p.name,
@@ -171,6 +240,7 @@ function seedIfEmpty(database: Database.Database) {
       margin_percent: calc.margin_percent,
       date_added: now,
       is_aud_direct: isAudDirect,
+      global_surcharge_aud: calc.global_surcharge_aud,
     });
   }
 }
@@ -184,6 +254,7 @@ export interface Product {
   buy_price_cny: number | null;
   buy_price_aud: number | null;
   shipping_buffer_aud: number;
+  global_surcharge_aud: number;
   platform_fee_aud: number | null;
   total_cost_aud: number | null;
   estimated_weight_kg: number;
@@ -205,7 +276,9 @@ export interface ExchangeRates {
   last_updated: string | null;
 }
 
-function getRates(database: Database.Database): Rates {
+export interface ShippingRate extends ShippingRateInput {}
+
+function getExchangeRatesInput(database: Database.Database): ExchangeRatesInput {
   const row = database
     .prepare('SELECT * FROM exchange_rates WHERE id = 1')
     .get() as ExchangeRates;
@@ -213,8 +286,52 @@ function getRates(database: Database.Database): Rates {
     usd_to_aud: row.usd_to_aud,
     cny_to_aud: row.cny_to_aud,
     alibaba_fee_percent: row.alibaba_fee_percent,
-    usd_per_kg_worst_case: row.usd_per_kg_worst_case,
   };
+}
+
+function getShippingRatesInput(database: Database.Database): ShippingRateInput[] {
+  return database
+    .prepare('SELECT * FROM shipping_rates ORDER BY id ASC')
+    .all() as ShippingRateInput[];
+}
+
+function recalculateAllProducts(database: Database.Database) {
+  const exchangeRates = getExchangeRatesInput(database);
+  const shippingRates = getShippingRatesInput(database);
+  const products = database.prepare('SELECT * FROM products').all() as Product[];
+  const update = database.prepare(`
+    UPDATE products SET
+      buy_price_aud = ?, shipping_buffer_aud = ?, global_surcharge_aud = ?,
+      platform_fee_aud = ?, total_cost_aud = ?, revenue_aud = ?,
+      net_profit_aud = ?, margin_percent = ?
+    WHERE id = ?
+  `);
+
+  for (const p of products) {
+    const calc = calculateProduct(
+      {
+        buy_price_cny: p.buy_price_cny,
+        buy_price_aud: p.is_aud_direct === 1 ? p.buy_price_aud : null,
+        is_aud_direct: p.is_aud_direct,
+        estimated_weight_kg: p.estimated_weight_kg,
+        sale_price_aud: p.sale_price_aud,
+        qty: p.qty,
+      },
+      exchangeRates,
+      shippingRates
+    );
+    update.run(
+      calc.buy_price_aud,
+      calc.shipping_buffer_aud,
+      calc.global_surcharge_aud,
+      calc.platform_fee_aud,
+      calc.total_cost_aud,
+      calc.revenue_aud,
+      calc.net_profit_aud,
+      calc.margin_percent,
+      p.id
+    );
+  }
 }
 
 export function getExchangeRates(): ExchangeRates {
@@ -223,31 +340,27 @@ export function getExchangeRates(): ExchangeRates {
     .get() as ExchangeRates;
 }
 
-export function updateExchangeRates(data: Partial<Rates>): ExchangeRates {
+export function updateExchangeRates(
+  data: Partial<ExchangeRatesInput & { usd_per_kg_worst_case?: number }>
+): ExchangeRates {
   const database = getDb();
   const current = getExchangeRates();
-  const updated: Rates = {
-    usd_to_aud: data.usd_to_aud ?? current.usd_to_aud,
-    cny_to_aud: data.cny_to_aud ?? current.cny_to_aud,
-    alibaba_fee_percent: data.alibaba_fee_percent ?? current.alibaba_fee_percent,
-    usd_per_kg_worst_case: data.usd_per_kg_worst_case ?? current.usd_per_kg_worst_case,
-  };
   const now = new Date().toISOString();
   database
     .prepare(
       `UPDATE exchange_rates SET
         usd_to_aud = ?, cny_to_aud = ?, alibaba_fee_percent = ?,
-        usd_per_kg_worst_case = ?, last_updated = ?
+        usd_per_kg_worst_case = COALESCE(?, usd_per_kg_worst_case), last_updated = ?
        WHERE id = 1`
     )
     .run(
-      updated.usd_to_aud,
-      updated.cny_to_aud,
-      updated.alibaba_fee_percent,
-      updated.usd_per_kg_worst_case,
+      data.usd_to_aud ?? current.usd_to_aud,
+      data.cny_to_aud ?? current.cny_to_aud,
+      data.alibaba_fee_percent ?? current.alibaba_fee_percent,
+      data.usd_per_kg_worst_case ?? null,
       now
     );
-  recalculateAllProducts(database, updated);
+  recalculateAllProducts(database);
   return getExchangeRates();
 }
 
@@ -265,12 +378,10 @@ export async function fetchLiveRates(): Promise<{ usd_to_aud: number; cny_to_aud
   let cnyToAud: number;
 
   if (data.conversion_rates) {
-    // v6 API
     usdToAud = data.conversion_rates.AUD;
     const usdToCny = data.conversion_rates.CNY;
     cnyToAud = usdToAud / usdToCny;
   } else {
-    // v4 API
     usdToAud = data.rates.AUD;
     const usdToCny = data.rates.CNY;
     cnyToAud = usdToAud / usdToCny;
@@ -280,44 +391,56 @@ export async function fetchLiveRates(): Promise<{ usd_to_aud: number; cny_to_aud
 }
 
 export function applyLiveRates(usdToAud: number, cnyToAud: number): ExchangeRates {
-  return updateExchangeRates({
-    usd_to_aud: usdToAud,
-    cny_to_aud: cnyToAud,
-  });
+  return updateExchangeRates({ usd_to_aud: usdToAud, cny_to_aud: cnyToAud });
 }
 
-function recalculateAllProducts(database: Database.Database, rates: Rates) {
-  const products = database.prepare('SELECT * FROM products').all() as Product[];
-  const update = database.prepare(`
-    UPDATE products SET
-      buy_price_aud = ?, shipping_buffer_aud = ?, platform_fee_aud = ?,
-      total_cost_aud = ?, revenue_aud = ?, net_profit_aud = ?, margin_percent = ?
-    WHERE id = ?
-  `);
+export function getAllShippingRates(): ShippingRate[] {
+  return getDb()
+    .prepare('SELECT * FROM shipping_rates ORDER BY id ASC')
+    .all() as ShippingRate[];
+}
 
-  for (const p of products) {
-    const calc = calculateProduct(
-      {
-        buy_price_cny: p.buy_price_cny,
-        buy_price_aud: p.is_aud_direct === 1 ? p.buy_price_aud : null,
-        is_aud_direct: p.is_aud_direct,
-        estimated_weight_kg: p.estimated_weight_kg,
-        sale_price_aud: p.sale_price_aud,
-        qty: p.qty,
-      },
-      rates
+export function updateShippingRate(
+  id: number,
+  data: Partial<Omit<ShippingRate, 'id'>>
+): ShippingRate | null {
+  const database = getDb();
+  const existing = database
+    .prepare('SELECT * FROM shipping_rates WHERE id = ?')
+    .get(id) as ShippingRate | undefined;
+  if (!existing) return null;
+
+  database
+    .prepare(
+      `UPDATE shipping_rates SET
+        country = ?, express_name = ?, rate_1kg_usd = ?,
+        rate_2kg_usd = ?, rate_3kg_usd = ?, is_base_country = ?
+       WHERE id = ?`
+    )
+    .run(
+      data.country ?? existing.country,
+      data.express_name ?? existing.express_name,
+      data.rate_1kg_usd ?? existing.rate_1kg_usd,
+      data.rate_2kg_usd ?? existing.rate_2kg_usd,
+      data.rate_3kg_usd ?? existing.rate_3kg_usd,
+      data.is_base_country ?? existing.is_base_country,
+      id
     );
-    update.run(
-      calc.buy_price_aud,
-      calc.shipping_buffer_aud,
-      calc.platform_fee_aud,
-      calc.total_cost_aud,
-      calc.revenue_aud,
-      calc.net_profit_aud,
-      calc.margin_percent,
-      p.id
-    );
-  }
+
+  recalculateAllProducts(database);
+  return database
+    .prepare('SELECT * FROM shipping_rates WHERE id = ?')
+    .get(id) as ShippingRate;
+}
+
+export function setBaseShippingCountry(countryId: number): ShippingRate[] {
+  const database = getDb();
+  database.prepare('UPDATE shipping_rates SET is_base_country = 0').run();
+  database
+    .prepare('UPDATE shipping_rates SET is_base_country = 1 WHERE id = ?')
+    .run(countryId);
+  recalculateAllProducts(database);
+  return getAllShippingRates();
 }
 
 export function getAllProducts(): { physical: Product[]; dropship: Product[] } {
@@ -345,10 +468,10 @@ export interface CreateProductInput {
 
 export function createProduct(input: CreateProductInput): Product {
   const database = getDb();
-  const rates = getRates(database);
+  const exchangeRates = getExchangeRatesInput(database);
+  const shippingRates = getShippingRatesInput(database);
   const isAudDirect = input.is_aud_direct ?? 0;
-  const qty =
-    input.fulfillment_type === 'Dropship' ? -1 : input.qty;
+  const qty = input.fulfillment_type === 'Dropship' ? -1 : input.qty;
 
   const calc = calculateProduct(
     {
@@ -359,17 +482,18 @@ export function createProduct(input: CreateProductInput): Product {
       sale_price_aud: input.sale_price_aud,
       qty,
     },
-    rates
+    exchangeRates,
+    shippingRates
   );
 
   const result = database
     .prepare(
       `INSERT INTO products (
         name, category, fulfillment_type, qty, buy_price_cny, buy_price_aud,
-        shipping_buffer_aud, platform_fee_aud, total_cost_aud, estimated_weight_kg,
-        sale_price_aud, revenue_aud, net_profit_aud, margin_percent, status,
-        date_added, is_aud_direct
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        shipping_buffer_aud, global_surcharge_aud, platform_fee_aud, total_cost_aud,
+        estimated_weight_kg, sale_price_aud, revenue_aud, net_profit_aud, margin_percent,
+        status, date_added, is_aud_direct
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.name,
@@ -379,6 +503,7 @@ export function createProduct(input: CreateProductInput): Product {
       isAudDirect ? null : (input.buy_price_cny ?? null),
       calc.buy_price_aud,
       calc.shipping_buffer_aud,
+      calc.global_surcharge_aud,
       calc.platform_fee_aud,
       calc.total_cost_aud,
       input.estimated_weight_kg,
@@ -409,7 +534,8 @@ export function updateProduct(
   const existing = getProductById(id);
   if (!existing) return null;
 
-  const rates = getRates(database);
+  const exchangeRates = getExchangeRatesInput(database);
+  const shippingRates = getShippingRatesInput(database);
   const isAudDirect =
     input.is_aud_direct !== undefined ? input.is_aud_direct : existing.is_aud_direct;
   const fulfillmentType = input.fulfillment_type ?? existing.fulfillment_type;
@@ -447,7 +573,8 @@ export function updateProduct(
       sale_price_aud: salePrice,
       qty,
     },
-    rates
+    exchangeRates,
+    shippingRates
   );
 
   database
@@ -455,9 +582,9 @@ export function updateProduct(
       `UPDATE products SET
         name = ?, category = ?, fulfillment_type = ?, qty = ?,
         buy_price_cny = ?, buy_price_aud = ?, shipping_buffer_aud = ?,
-        platform_fee_aud = ?, total_cost_aud = ?, estimated_weight_kg = ?,
-        sale_price_aud = ?, revenue_aud = ?, net_profit_aud = ?,
-        margin_percent = ?, status = ?, is_aud_direct = ?
+        global_surcharge_aud = ?, platform_fee_aud = ?, total_cost_aud = ?,
+        estimated_weight_kg = ?, sale_price_aud = ?, revenue_aud = ?,
+        net_profit_aud = ?, margin_percent = ?, status = ?, is_aud_direct = ?
       WHERE id = ?`
     )
     .run(
@@ -468,6 +595,7 @@ export function updateProduct(
       buyPriceCny,
       calc.buy_price_aud,
       calc.shipping_buffer_aud,
+      calc.global_surcharge_aud,
       calc.platform_fee_aud,
       calc.total_cost_aud,
       estimatedWeight,
@@ -499,6 +627,10 @@ export function getDashboardStats() {
   let totalProfit = 0;
   let marginSum = 0;
   let marginCount = 0;
+  let tbdCount = 0;
+  let onTarget = 0;
+  let watch = 0;
+  let belowTarget = 0;
 
   const fulfillmentMap: Record<
     string,
@@ -506,10 +638,19 @@ export function getDashboardStats() {
   > = {};
   const categoryMap: Record<
     string,
-    { count: number; marginSum: number; marginCount: number }
+    { count: number; marginSum: number; marginCount: number; profit: number }
   > = {};
 
   for (const p of products) {
+    const isTbd = p.buy_price_aud === null && p.buy_price_cny === null;
+    if (isTbd) tbdCount++;
+
+    if (p.net_profit_aud !== null) {
+      if (p.net_profit_aud >= 50) onTarget++;
+      else if (p.net_profit_aud >= 20) watch++;
+      else belowTarget++;
+    }
+
     if (p.total_cost_aud !== null) totalCost += p.total_cost_aud;
     totalRevenue += p.revenue_aud;
     if (p.net_profit_aud !== null) totalProfit += p.net_profit_aud;
@@ -530,14 +671,25 @@ export function getDashboardStats() {
 
     const cat = p.category;
     if (!categoryMap[cat]) {
-      categoryMap[cat] = { count: 0, marginSum: 0, marginCount: 0 };
+      categoryMap[cat] = { count: 0, marginSum: 0, marginCount: 0, profit: 0 };
     }
     categoryMap[cat].count++;
     if (p.margin_percent !== null) {
       categoryMap[cat].marginSum += p.margin_percent;
       categoryMap[cat].marginCount++;
     }
+    if (p.net_profit_aud !== null) {
+      categoryMap[cat].profit += p.net_profit_aud;
+    }
   }
+
+  const profitValues = products
+    .map((p) => p.net_profit_aud)
+    .filter((v): v is number => v !== null);
+  const avgProfit =
+    profitValues.length > 0
+      ? profitValues.reduce((a, b) => a + b, 0) / profitValues.length
+      : 0;
 
   return {
     kpis: {
@@ -546,7 +698,10 @@ export function getDashboardStats() {
       totalRevenueAud: totalRevenue,
       totalNetProfitAud: totalProfit,
       avgMarginPercent: marginCount > 0 ? marginSum / marginCount : 0,
+      tbdCount,
+      avgProfit,
     },
+    profitHealth: { onTarget, watch, belowTarget },
     fulfillment: Object.entries(fulfillmentMap).map(([type, data]) => ({
       type,
       ...data,
@@ -556,6 +711,7 @@ export function getDashboardStats() {
       count: data.count,
       avgMargin:
         data.marginCount > 0 ? data.marginSum / data.marginCount : null,
+      profit: data.profit,
     })),
   };
 }

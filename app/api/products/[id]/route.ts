@@ -1,7 +1,8 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { apiError, apiSuccess } from '@/lib/api-response';
+import { updateProduct, deleteProduct } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
-import { updateProduct, deleteProduct } from '@/lib/db';
 
 export async function PUT(
   request: NextRequest,
@@ -9,21 +10,14 @@ export async function PUT(
 ) {
   try {
     const id = parseInt(params.id, 10);
-    if (isNaN(id)) {
-      return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
-    }
+    if (isNaN(id)) return apiError('Invalid ID', 400);
     const body = await request.json();
     const product = updateProduct(id, body);
-    if (!product) {
-      return NextResponse.json({ error: 'Product not found' }, { status: 404 });
-    }
-    return NextResponse.json(product);
+    if (!product) return apiError('Product not found', 404);
+    return apiSuccess(product);
   } catch (error) {
     console.error(error);
-    return NextResponse.json(
-      { error: 'Failed to update product' },
-      { status: 500 }
-    );
+    return apiError('Failed to update product');
   }
 }
 
@@ -33,19 +27,12 @@ export async function DELETE(
 ) {
   try {
     const id = parseInt(params.id, 10);
-    if (isNaN(id)) {
-      return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
-    }
+    if (isNaN(id)) return apiError('Invalid ID', 400);
     const deleted = deleteProduct(id);
-    if (!deleted) {
-      return NextResponse.json({ error: 'Product not found' }, { status: 404 });
-    }
-    return NextResponse.json({ success: true });
+    if (!deleted) return apiError('Product not found', 404);
+    return apiSuccess({ deleted: true });
   } catch (error) {
     console.error(error);
-    return NextResponse.json(
-      { error: 'Failed to delete product' },
-      { status: 500 }
-    );
+    return apiError('Failed to delete product');
   }
 }

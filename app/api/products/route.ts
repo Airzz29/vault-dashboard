@@ -1,18 +1,16 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { apiError, apiSuccess } from '@/lib/api-response';
+import { getAllProducts, createProduct } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
-import { getAllProducts, createProduct } from '@/lib/db';
 
 export async function GET() {
   try {
     const products = getAllProducts();
-    return NextResponse.json(products);
+    return apiSuccess(products);
   } catch (error) {
     console.error(error);
-    return NextResponse.json(
-      { error: 'Failed to fetch products' },
-      { status: 500 }
-    );
+    return apiError('Failed to fetch products');
   }
 }
 
@@ -20,12 +18,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const product = createProduct(body);
-    return NextResponse.json(product, { status: 201 });
+    return apiSuccess(product, 201);
   } catch (error) {
     console.error(error);
-    return NextResponse.json(
-      { error: 'Failed to create product' },
-      { status: 500 }
-    );
+    return apiError('Failed to create product');
   }
 }

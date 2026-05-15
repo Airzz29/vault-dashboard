@@ -1,18 +1,15 @@
-import { NextResponse } from 'next/server';
+import { apiError, apiSuccess } from '@/lib/api-response';
+import { fetchLiveRates, applyLiveRates } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
-import { fetchLiveRates, applyLiveRates } from '@/lib/db';
 
 export async function POST() {
   try {
     const live = await fetchLiveRates();
     const rates = applyLiveRates(live.usd_to_aud, live.cny_to_aud);
-    return NextResponse.json(rates);
+    return apiSuccess(rates);
   } catch (error) {
     console.error(error);
-    return NextResponse.json(
-      { error: 'Failed to refresh rates' },
-      { status: 500 }
-    );
+    return apiError('Failed to refresh rates');
   }
 }

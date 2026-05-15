@@ -1,14 +1,14 @@
 import { apiError, apiSuccess } from '@/lib/api-response';
-import { getDashboardStats } from '@/lib/db';
+import { getAllShippingRates } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    const stats = getDashboardStats();
-    return apiSuccess(stats);
+    const rates = getAllShippingRates();
+    return apiSuccess(rates);
   } catch (error) {
     console.error(error);
-    return apiError('Failed to fetch dashboard stats');
+    return apiError('Failed to fetch shipping rates');
   }
 }

@@ -1,8 +1,17 @@
-export interface Rates {
+export interface ExchangeRatesInput {
   usd_to_aud: number;
   cny_to_aud: number;
   alibaba_fee_percent: number;
-  usd_per_kg_worst_case: number;
+}
+
+export interface ShippingRateInput {
+  id: number;
+  country: string;
+  express_name: string;
+  rate_1kg_usd: number;
+  rate_2kg_usd: number;
+  rate_3kg_usd: number;
+  is_base_country: number;
 }
 
 export interface ProductInput {
@@ -14,9 +23,17 @@ export interface ProductInput {
   qty: number;
 }
 
+export interface ShippingResult {
+  aus_shipping_aud: number;
+  worst_case_aud: number;
+  global_surcharge_aud: number;
+  shipping_buffer_aud: number;
+}
+
 export interface ProductCalculated {
   buy_price_aud: number | null;
   shipping_buffer_aud: number;
+  global_surcharge_aud: number;
   platform_fee_aud: number | null;
   total_cost_aud: number | null;
   revenue_aud: number;
@@ -24,29 +41,85 @@ export interface ProductCalculated {
   margin_percent: number | null;
 }
 
-export function calculateProduct(
-  input: ProductInput,
-  rates: Rates
-): ProductCalculated {
-  let buyPriceAud: number | null = null;
+export function interpolateShippingUsd(
+  weightKg: number,
+  rate: Pick<ShippingRateInput, 'rate_1kg_usd' | 'rate_2kg_usd' | 'rate_3kg_usd'>
+): number {
+  const { rate_1kg_usd, rate_2kg_usd, rate_3kg_usd } = rate;
+  if (weightKg <= 1) {
+    return (weightKg / 1) * rate_1kg_usd;
+  }
+  if (weightKg <= 2) {
+    return rate_1kg_usd + (weightKg - 1) * (rate_2kg_usd - rate_1kg_usd);
+  }
+  return rate_2kg_usd + (weightKg - 2) * (rate_3kg_usd - rate_2kg_usd);
+}
 
-  if (input.is_aud_direct === 1) {
-    buyPriceAud = input.buy_price_aud;
-  } else if (input.buy_price_cny !== null) {
-    buyPriceAud = input.buy_price_cny * rates.cny_to_aud;
+export function calculateShipping(
+  weightKg: number,
+  shippingRates: ShippingRateInput[],
+  usdToAud: number
+): ShippingResult {
+  const baseRate = shippingRates.find((r) => r.is_base_country === 1);
+  if (!baseRate) {
+    throw new Error('No base country shipping rate configured');
   }
 
-  const shippingBufferAud =
-    input.estimated_weight_kg * rates.usd_per_kg_worst_case * rates.usd_to_aud;
+  const worstCaseRate = shippingRates.reduce((worst, r) =>
+    r.rate_1kg_usd > worst.rate_1kg_usd ? r : worst
+  );
+
+  const ausUsd = interpolateShippingUsd(weightKg, baseRate);
+  const worstUsd = interpolateShippingUsd(weightKg, worstCaseRate);
+
+  const aus_shipping_aud = ausUsd * usdToAud;
+  const worst_case_aud = worstUsd * usdToAud;
+  const global_surcharge_aud = worst_case_aud - aus_shipping_aud;
+  const shipping_buffer_aud = aus_shipping_aud;
+
+  return {
+    aus_shipping_aud,
+    worst_case_aud,
+    global_surcharge_aud,
+    shipping_buffer_aud,
+  };
+}
+
+export function calculateBuyPriceAud(
+  input: Pick<ProductInput, 'buy_price_cny' | 'buy_price_aud' | 'is_aud_direct'>,
+  rates: ExchangeRatesInput
+): number | null {
+  if (input.is_aud_direct === 1) {
+    return input.buy_price_aud;
+  }
+  if (input.buy_price_cny !== null && input.buy_price_cny !== undefined) {
+    return input.buy_price_cny * rates.cny_to_aud;
+  }
+  return null;
+}
+
+export function calculateProduct(
+  input: ProductInput,
+  exchangeRates: ExchangeRatesInput,
+  shippingRates: ShippingRateInput[]
+): ProductCalculated {
+  const buyPriceAud = calculateBuyPriceAud(input, exchangeRates);
+
+  const shipping = calculateShipping(
+    input.estimated_weight_kg,
+    shippingRates,
+    exchangeRates.usd_to_aud
+  );
 
   let platformFeeAud: number | null = null;
   if (buyPriceAud !== null) {
-    platformFeeAud = buyPriceAud * rates.alibaba_fee_percent;
+    platformFeeAud = buyPriceAud * exchangeRates.alibaba_fee_percent;
   }
 
   let totalCostAud: number | null = null;
   if (buyPriceAud !== null && platformFeeAud !== null) {
-    const unitCost = buyPriceAud + shippingBufferAud + platformFeeAud;
+    const unitCost =
+      buyPriceAud + shipping.shipping_buffer_aud + platformFeeAud;
     const effectiveQty = input.qty === -1 ? 1 : input.qty;
     totalCostAud = unitCost * effectiveQty;
   }
@@ -66,7 +139,8 @@ export function calculateProduct(
 
   return {
     buy_price_aud: buyPriceAud,
-    shipping_buffer_aud: shippingBufferAud,
+    shipping_buffer_aud: shipping.shipping_buffer_aud,
+    global_surcharge_aud: shipping.global_surcharge_aud,
     platform_fee_aud: platformFeeAud,
     total_cost_aud: totalCostAud,
     revenue_aud: revenueAud,
@@ -75,16 +149,44 @@ export function calculateProduct(
   };
 }
 
+export function getProfitColorClass(profit: number | null): string {
+  if (profit === null) return 'text-vault-warning italic';
+  if (profit >= 50) return 'text-vault-success';
+  if (profit >= 20) return 'text-vault-warning';
+  return 'text-vault-danger';
+}
+
+export function getMarginColorClass(marginPercent: number | null): string {
+  if (marginPercent === null) return 'text-vault-warning italic';
+  const pct = marginPercent * 100;
+  if (pct >= 40) return 'text-vault-success';
+  if (pct >= 20) return 'text-vault-warning';
+  return 'text-vault-danger';
+}
+
 export function formatCurrency(value: number | null | undefined): string {
-  if (value === null || value === undefined) return 'TBD';
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return 'TBD';
+  }
   return `$${value.toFixed(2)}`;
 }
 
-export function formatPercent(value: number | null): string {
-  if (value === null) return 'TBD';
+export function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return 'TBD';
+  }
   return `${(value * 100).toFixed(1)}%`;
 }
 
 export function formatQty(qty: number): string {
   return qty === -1 ? '∞' : String(qty);
+}
+
+export function isTbdBuyPrice(
+  buyPriceCny: number | null,
+  buyPriceAud: number | null,
+  isAudDirect: number
+): boolean {
+  if (isAudDirect === 1) return buyPriceAud === null;
+  return buyPriceCny === null;
 }
