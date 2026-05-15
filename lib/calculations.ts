@@ -190,3 +190,94 @@ export function isTbdBuyPrice(
   if (isAudDirect === 1) return buyPriceAud === null;
   return buyPriceCny === null;
 }
+
+/** Per-unit profit preview for Add/Edit modal (surcharge informational, not in total cost). */
+export interface ModalProfitBreakdown {
+  buy_price_aud: number | null;
+  aus_shipping_aud: number | null;
+  global_surcharge_aud: number | null;
+  platform_fee_aud: number | null;
+  total_cost_aud: number | null;
+  sale_price_aud: number | null;
+  net_profit_aud: number | null;
+  margin_percent: number | null;
+  canCalculate: boolean;
+}
+
+export interface ModalProfitInput {
+  buy_price_cny: number | null;
+  buy_price_aud: number | null;
+  is_aud_direct: number;
+  estimated_weight_kg: number;
+  sale_price_aud: number | null;
+}
+
+export function calculateModalProfitBreakdown(
+  input: ModalProfitInput,
+  exchangeRates: ExchangeRatesInput,
+  shippingRates: ShippingRateInput[]
+): ModalProfitBreakdown {
+  const empty: ModalProfitBreakdown = {
+    buy_price_aud: null,
+    aus_shipping_aud: null,
+    global_surcharge_aud: null,
+    platform_fee_aud: null,
+    total_cost_aud: null,
+    sale_price_aud: null,
+    net_profit_aud: null,
+    margin_percent: null,
+    canCalculate: false,
+  };
+
+  const salePrice =
+    input.sale_price_aud !== null &&
+    input.sale_price_aud !== undefined &&
+    input.sale_price_aud > 0
+      ? input.sale_price_aud
+      : null;
+
+  const shipping = calculateShipping(
+    input.estimated_weight_kg,
+    shippingRates,
+    exchangeRates.usd_to_aud
+  );
+
+  const buyPriceAud = calculateBuyPriceAud(input, exchangeRates);
+
+  if (buyPriceAud === null || salePrice === null) {
+    return {
+      ...empty,
+      aus_shipping_aud: shipping.aus_shipping_aud,
+      global_surcharge_aud: shipping.global_surcharge_aud,
+      sale_price_aud: salePrice,
+    };
+  }
+
+  const platformFeeAud = buyPriceAud * exchangeRates.alibaba_fee_percent;
+  const totalCostAud =
+    buyPriceAud + shipping.aus_shipping_aud + platformFeeAud;
+  const netProfitAud = salePrice - totalCostAud;
+  const marginPercent = salePrice > 0 ? netProfitAud / salePrice : null;
+
+  return {
+    buy_price_aud: buyPriceAud,
+    aus_shipping_aud: shipping.aus_shipping_aud,
+    global_surcharge_aud: shipping.global_surcharge_aud,
+    platform_fee_aud: platformFeeAud,
+    total_cost_aud: totalCostAud,
+    sale_price_aud: salePrice,
+    net_profit_aud: netProfitAud,
+    margin_percent: marginPercent,
+    canCalculate: true,
+  };
+}
+
+export function formatBreakdownValue(
+  value: number | null | undefined,
+  asCurrency = true
+): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return '—';
+  }
+  return asCurrency ? `$${value.toFixed(2)}` : `${(value * 100).toFixed(1)}%`;
+}
