@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: vault-dashboard
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: VAULT_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: EXCHANGERATE_API_KEY
+        sync: false
+    disk:
+      name: vault-data
+      mountPath: /data
+      sizeGB: 1
