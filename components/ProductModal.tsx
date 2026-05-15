@@ -73,8 +73,10 @@ export default function ProductModal({
   const [ratesLoading, setRatesLoading] = useState(false);
 
   const exchangeRates = modalRates ?? exchangeRatesProp ?? null;
-  const shippingRates =
-    modalShipping.length > 0 ? modalShipping : (shippingRatesProp ?? []);
+  const shippingRates = useMemo(
+    () => (modalShipping.length > 0 ? modalShipping : shippingRatesProp ?? []),
+    [modalShipping, shippingRatesProp]
+  );
 
   useEffect(() => {
     if (!isOpen) return;

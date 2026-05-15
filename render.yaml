@@ -3,7 +3,7 @@ services:
     name: vault-dashboard
     env: node
     buildCommand: npm install && npm run build
-    startCommand: npm start
+    startCommand: node .next/standalone/server.js
     envVars:
       - key: NODE_ENV
         value: production

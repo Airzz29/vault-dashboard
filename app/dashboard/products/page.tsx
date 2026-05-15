@@ -104,7 +104,10 @@ function ProductsContent() {
     return filterAndSort(dropship);
   }, [dropship, tab, filterAndSort]);
 
-  const displayed = [...filteredPhysical, ...filteredDropship];
+  const displayed = useMemo(
+    () => [...filteredPhysical, ...filteredDropship],
+    [filteredPhysical, filteredDropship]
+  );
 
   const stats = useMemo(() => {
     const profits = displayed

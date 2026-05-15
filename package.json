@@ -2,29 +2,31 @@
   "name": "vault-dashboard",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "build": "next build && node scripts/copy-standalone-assets.js",
+    "start": "node .next/standalone/server.js",
+    "start:next": "next start",
     "lint": "next lint"
   },
   "dependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
     "autoprefixer": "^10.4.20",
     "better-sqlite3": "^11.7.0",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.18",
     "jose": "^5.9.6",
     "next": "14.2.18",
     "postcss": "^8.4.49",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "tailwindcss": "^3.4.16"
-  },
-  "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
-    "@types/node": "^20",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "eslint": "^8",
-    "eslint-config-next": "14.2.18",
+    "tailwindcss": "^3.4.16",
     "typescript": "^5"
   }
 }
